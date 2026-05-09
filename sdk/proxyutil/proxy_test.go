@@ -167,7 +167,7 @@ func TestBuildHTTPTransportSOCKS5HProxy(t *testing.T) {
 	}
 }
 
-func TestBuildDialerHTTPProxyCONNECT(t *testing.T) {
+func TestBuildDialerHTTPProxyConnect(t *testing.T) {
 	t.Parallel()
 
 	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
@@ -202,8 +202,8 @@ func TestBuildDialerHTTPProxyCONNECT(t *testing.T) {
 			done <- fmt.Errorf("method = %s, want CONNECT", req.Method)
 			return
 		}
-		if req.Host != "target.example.com:443" {
-			done <- fmt.Errorf("host = %s, want target.example.com:443", req.Host)
+		if req.Host != "api.anthropic.com:443" {
+			done <- fmt.Errorf("host = %s, want api.anthropic.com:443", req.Host)
 			return
 		}
 		wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("user:pass"))
@@ -241,7 +241,7 @@ func TestBuildDialerHTTPProxyCONNECT(t *testing.T) {
 		t.Fatal("expected dialer, got nil")
 	}
 
-	conn, errDial := dialer.Dial("tcp", "target.example.com:443")
+	conn, errDial := dialer.Dial("tcp", "api.anthropic.com:443")
 	if errDial != nil {
 		t.Fatalf("dialer.Dial returned error: %v", errDial)
 	}

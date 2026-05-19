@@ -1017,7 +1017,7 @@ func TestApplyClaudeAccountUUID_FillsJSONUserIDFromTopLevelMetadata(t *testing.T
 		},
 	}
 
-	out := applyClaudeAccountUUID(payload, auth)
+	out := applyClaudeUserIDMetadata(payload, auth)
 	userID := gjson.GetBytes(out, "metadata.user_id").String()
 
 	if got := gjson.Get(userID, "account_uuid").String(); got != "11111111-2222-4333-8444-555555555555" {
@@ -1041,7 +1041,7 @@ func TestApplyClaudeAccountUUID_FillsJSONUserIDFromNestedAccount(t *testing.T) {
 		},
 	}
 
-	out := applyClaudeAccountUUID(payload, auth)
+	out := applyClaudeUserIDMetadata(payload, auth)
 	userID := gjson.GetBytes(out, "metadata.user_id").String()
 
 	if got := gjson.Get(userID, "account_uuid").String(); got != "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" {
@@ -1057,11 +1057,53 @@ func TestApplyClaudeAccountUUID_DoesNotOverrideExistingJSONUserIDAccountUUID(t *
 		},
 	}
 
-	out := applyClaudeAccountUUID(payload, auth)
+	out := applyClaudeUserIDMetadata(payload, auth)
 	userID := gjson.GetBytes(out, "metadata.user_id").String()
 
 	if got := gjson.Get(userID, "account_uuid").String(); got != "existing-account" {
 		t.Fatalf("account_uuid = %q, want existing-account", got)
+	}
+}
+
+func TestApplyClaudeUserIDMetadata_OverwritesStringDeviceIDFromAuth(t *testing.T) {
+	payload := []byte(`{"metadata":{"user_id":"{\"device_id\":\"client-device\",\"account_uuid\":\"\",\"session_id\":\"session-1\"}"}}`)
+	auth := &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"account_uuid": "11111111-2222-4333-8444-555555555555",
+			"device_id":    "auth-device",
+		},
+	}
+
+	out := applyClaudeUserIDMetadata(payload, auth)
+	userID := gjson.GetBytes(out, "metadata.user_id").String()
+
+	if got := gjson.Get(userID, "device_id").String(); got != "auth-device" {
+		t.Fatalf("device_id = %q, want auth-device", got)
+	}
+	if got := gjson.Get(userID, "account_uuid").String(); got != "11111111-2222-4333-8444-555555555555" {
+		t.Fatalf("account_uuid = %q, want auth metadata account_uuid", got)
+	}
+	if got := gjson.Get(userID, "session_id").String(); got != "session-1" {
+		t.Fatalf("session_id = %q, want preserved", got)
+	}
+}
+
+func TestApplyClaudeUserIDMetadata_OverwritesObjectDeviceIDFromAuth(t *testing.T) {
+	payload := []byte(`{"metadata":{"user_id":{"device_id":"client-device","account_uuid":"","session_id":"session-1"}}}`)
+	auth := &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"device_id": "auth-device",
+		},
+	}
+
+	out := applyClaudeUserIDMetadata(payload, auth)
+	userID := gjson.GetBytes(out, "metadata.user_id")
+
+	if got := userID.Get("device_id").String(); got != "auth-device" {
+		t.Fatalf("device_id = %q, want auth-device", got)
+	}
+	if got := userID.Get("session_id").String(); got != "session-1" {
+		t.Fatalf("session_id = %q, want preserved", got)
 	}
 }
 

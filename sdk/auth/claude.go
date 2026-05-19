@@ -207,6 +207,9 @@ waitForCallback:
 	if tokenStorage.AccountUUID != "" {
 		metadata["account_uuid"] = tokenStorage.AccountUUID
 	}
+	if tokenStorage.DeviceID != "" {
+		metadata["device_id"] = tokenStorage.DeviceID
+	}
 
 	fmt.Println("Claude authentication successful")
 	if authBundle.APIKey != "" {

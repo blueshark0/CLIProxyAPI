@@ -34,6 +34,9 @@ type ClaudeTokenStorage struct {
 	// AccountUUID is the Anthropic account UUID associated with this token.
 	AccountUUID string `json:"account_uuid,omitempty"`
 
+	// DeviceID is the Claude Code device identifier associated with this token.
+	DeviceID string `json:"device_id,omitempty"`
+
 	// Type indicates the authentication provider type, always "claude" for this storage.
 	Type string `json:"type"`
 

@@ -19,6 +19,8 @@ type ClaudeTokenData struct {
 	Email string `json:"email"`
 	// AccountUUID is the Anthropic account UUID returned by OAuth token exchange
 	AccountUUID string `json:"account_uuid,omitempty"`
+	// DeviceID is the Claude Code device identifier associated with the token
+	DeviceID string `json:"device_id,omitempty"`
 	// Expire is the timestamp of the token expire
 	Expire string `json:"expired"`
 }

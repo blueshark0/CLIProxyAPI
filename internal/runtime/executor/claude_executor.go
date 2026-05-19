@@ -161,7 +161,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
-	body = applyClaudeAccountUUID(body, auth)
+	body = applyClaudeUserIDMetadata(body, auth)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -340,7 +340,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
-	body = applyClaudeAccountUUID(body, auth)
+	body = applyClaudeUserIDMetadata(body, auth)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
@@ -600,7 +600,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
-	body = applyClaudeAccountUUID(body, auth)
+	body = applyClaudeUserIDMetadata(body, auth)
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
@@ -1104,6 +1104,24 @@ func claudeAccountUUID(a *cliproxyauth.Auth) string {
 	return ""
 }
 
+func claudeDeviceID(a *cliproxyauth.Auth) string {
+	if a == nil || a.Metadata == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(metaString(a.Metadata, "device_id")); v != "" {
+		return v
+	}
+	if device, ok := a.Metadata["device"].(map[string]any); ok {
+		if v := strings.TrimSpace(metaString(device, "id")); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(metaString(device, "device_id")); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func metaString(metadata map[string]any, key string) string {
 	if metadata == nil {
 		return ""
@@ -1114,9 +1132,10 @@ func metaString(metadata map[string]any, key string) string {
 	return ""
 }
 
-func applyClaudeAccountUUID(payload []byte, auth *cliproxyauth.Auth) []byte {
+func applyClaudeUserIDMetadata(payload []byte, auth *cliproxyauth.Auth) []byte {
 	accountUUID := claudeAccountUUID(auth)
-	if accountUUID == "" {
+	deviceID := claudeDeviceID(auth)
+	if accountUUID == "" && deviceID == "" {
 		return payload
 	}
 	userID := gjson.GetBytes(payload, "metadata.user_id")
@@ -1124,14 +1143,32 @@ func applyClaudeAccountUUID(payload []byte, auth *cliproxyauth.Auth) []byte {
 		return payload
 	}
 	if userID.IsObject() {
-		if strings.TrimSpace(userID.Get("account_uuid").String()) != "" {
+		updatedUserID := []byte(userID.Raw)
+		changed := false
+		if accountUUID != "" && strings.TrimSpace(userID.Get("account_uuid").String()) == "" {
+			var err error
+			updatedUserID, err = sjson.SetBytes(updatedUserID, "account_uuid", accountUUID)
+			if err != nil {
+				return payload
+			}
+			changed = true
+		}
+		if deviceID != "" {
+			var err error
+			updatedUserID, err = sjson.SetBytes(updatedUserID, "device_id", deviceID)
+			if err != nil {
+				return payload
+			}
+			changed = true
+		}
+		if !changed {
 			return payload
 		}
-		updated, err := sjson.SetBytes(payload, "metadata.user_id.account_uuid", accountUUID)
+		updatedPayload, err := sjson.SetRawBytes(payload, "metadata.user_id", updatedUserID)
 		if err != nil {
 			return payload
 		}
-		return updated
+		return updatedPayload
 	}
 	if userID.Type != gjson.String {
 		return payload
@@ -1141,11 +1178,29 @@ func applyClaudeAccountUUID(payload []byte, auth *cliproxyauth.Auth) []byte {
 		return payload
 	}
 	parsedUserID := gjson.Parse(rawUserID)
-	if !parsedUserID.IsObject() || strings.TrimSpace(parsedUserID.Get("account_uuid").String()) != "" {
+	if !parsedUserID.IsObject() {
 		return payload
 	}
-	updatedUserID, err := sjson.Set(rawUserID, "account_uuid", accountUUID)
-	if err != nil {
+
+	updatedUserID := rawUserID
+	changed := false
+	if accountUUID != "" && strings.TrimSpace(parsedUserID.Get("account_uuid").String()) == "" {
+		var err error
+		updatedUserID, err = sjson.Set(updatedUserID, "account_uuid", accountUUID)
+		if err != nil {
+			return payload
+		}
+		changed = true
+	}
+	if deviceID != "" {
+		var err error
+		updatedUserID, err = sjson.Set(updatedUserID, "device_id", deviceID)
+		if err != nil {
+			return payload
+		}
+		changed = true
+	}
+	if !changed {
 		return payload
 	}
 	updatedPayload, err := sjson.SetBytes(payload, "metadata.user_id", updatedUserID)

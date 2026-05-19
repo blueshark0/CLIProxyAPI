@@ -443,6 +443,7 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 		LastRefresh:  bundle.LastRefresh,
 		Email:        bundle.TokenData.Email,
 		AccountUUID:  bundle.TokenData.AccountUUID,
+		DeviceID:     bundle.TokenData.DeviceID,
 		Expire:       bundle.TokenData.Expire,
 	}
 
@@ -503,6 +504,9 @@ func (o *ClaudeAuth) UpdateTokenStorage(storage *ClaudeTokenStorage, tokenData *
 	storage.Email = tokenData.Email
 	if tokenData.AccountUUID != "" {
 		storage.AccountUUID = tokenData.AccountUUID
+	}
+	if tokenData.DeviceID != "" {
+		storage.DeviceID = tokenData.DeviceID
 	}
 	storage.Expire = tokenData.Expire
 }

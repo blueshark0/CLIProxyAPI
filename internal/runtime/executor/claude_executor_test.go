@@ -16,7 +16,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
-	xxHash64 "github.com/pierrec/xxHash/xxHash64"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -2191,9 +2190,17 @@ func TestClaudeExecutor_ExperimentalCCHSigningOptInSignsFinalBody(t *testing.T) 
 	}
 	actualCCH := string(match[2])
 	unsignedBody := billingPattern.ReplaceAll(seenBody, []byte(`${1}00000${3}`))
-	wantCCH := fmt.Sprintf("%05x", xxHash64.Checksum(unsignedBody, 0x6E52736AC806831E)&0xFFFFF)
+	wantCCH := computeClaudeCCH(unsignedBody)
 	if actualCCH != wantCCH {
 		t.Fatalf("cch = %q, want %q\nbody: %s", actualCCH, wantCCH, string(seenBody))
+	}
+}
+
+func TestComputeClaudeCCH_UsesKeyedAttestationHash(t *testing.T) {
+	unsignedBody := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.144.78a; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	if got := computeClaudeCCH(unsignedBody); got != "020f5" {
+		t.Fatalf("computeClaudeCCH() = %q, want %q", got, "020f5")
 	}
 }
 

@@ -1215,7 +1215,7 @@ func checkSystemInstructions(payload []byte) []byte {
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
-	return strings.Contains(apiKey, "sk-ant-oat")
+	return strings.Contains(apiKey, "sk-ant-oat") || strings.Contains(apiKey, "sk-rec")
 }
 
 // prepareClaudeOAuthToolNamesForUpstream applies the Claude OAuth tool-name

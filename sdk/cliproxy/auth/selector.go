@@ -471,7 +471,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // Priority for session ID extraction:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority
 //  2. X-Session-ID header
-//  3. Session_id header (Codex)
+//  3. Session-Id header (Codex), falling back to legacy Session_id
 //  4. X-Amp-Thread-Id header (Amp CLI thread ID)
 //  5. X-Client-Request-Id header (PI)
 //  6. metadata.user_id (non-Claude Code format)
@@ -573,7 +573,7 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 // Priority order:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients
 //  2. X-Session-ID header
-//  3. Session_id header (Codex)
+//  3. Session-Id header (Codex), falling back to legacy Session_id
 //  4. X-Amp-Thread-Id header (Amp CLI thread ID)
 //  5. X-Client-Request-Id header (PI)
 //  6. metadata.user_id (non-Claude Code format)
@@ -614,9 +614,9 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
-	// 3. Session_id header (Codex)
+	// 3. Session-Id header (Codex), falling back to legacy Session_id
 	if headers != nil {
-		if sid := headers.Get("Session_id"); sid != "" {
+		if sid := codexSessionHeader(headers); sid != "" {
 			return "codex:" + sid, ""
 		}
 	}
@@ -652,6 +652,16 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 
 	// 8. Hash-based fallback from message content
 	return extractMessageHashIDs(payload)
+}
+
+func codexSessionHeader(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	if sid := strings.TrimSpace(headers.Get("Session-Id")); sid != "" {
+		return sid
+	}
+	return strings.TrimSpace(headers.Get("Session_id"))
 }
 
 func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {

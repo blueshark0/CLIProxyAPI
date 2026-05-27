@@ -650,6 +650,34 @@ func TestRepairResponsesWebsocketToolCallsInsertsCachedOutput(t *testing.T) {
 	}
 }
 
+func TestWebsocketDownstreamSessionKeyCodexSessionHeader(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/realtime", nil)
+	req.Header.Set("Session-Id", "codex-session-new")
+
+	if got := websocketDownstreamSessionKey(req); got != "codex-session-new" {
+		t.Fatalf("websocketDownstreamSessionKey() = %q, want %q", got, "codex-session-new")
+	}
+}
+
+func TestWebsocketDownstreamSessionKeyCodexSessionHeaderPrefersHyphenated(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/realtime", nil)
+	req.Header.Set("Session-Id", "codex-session-new")
+	req.Header.Set("Session_id", "codex-session-legacy")
+
+	if got := websocketDownstreamSessionKey(req); got != "codex-session-new" {
+		t.Fatalf("websocketDownstreamSessionKey() = %q, want %q", got, "codex-session-new")
+	}
+}
+
+func TestWebsocketDownstreamSessionKeyCodexSessionHeaderLegacyFallback(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/realtime", nil)
+	req.Header.Set("Session_id", "codex-session-legacy")
+
+	if got := websocketDownstreamSessionKey(req); got != "codex-session-legacy" {
+		t.Fatalf("websocketDownstreamSessionKey() = %q, want %q", got, "codex-session-legacy")
+	}
+}
+
 func TestRepairResponsesWebsocketToolCallsDropsOrphanFunctionCall(t *testing.T) {
 	cache := newWebsocketToolOutputCache(time.Minute, 10)
 	sessionKey := "session-1"

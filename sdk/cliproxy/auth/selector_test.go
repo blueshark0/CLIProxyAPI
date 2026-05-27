@@ -780,6 +780,33 @@ func TestExtractSessionID_CodexSessionIDHeader(t *testing.T) {
 	t.Parallel()
 
 	headers := make(http.Header)
+	headers.Set("Session-Id", "codex-session-123")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "codex:codex-session-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() with Session-Id = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_CodexSessionIDHeaderPrefersHyphenated(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("Session-Id", "codex-session-new")
+	headers.Set("Session_id", "codex-session-legacy")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "codex:codex-session-new"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (Session-Id should take priority over Session_id)", got, want)
+	}
+}
+
+func TestExtractSessionID_CodexSessionIDHeaderLegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
 	headers.Set("Session_id", "codex-session-123")
 
 	got := ExtractSessionID(headers, nil, nil)
@@ -807,12 +834,12 @@ func TestExtractSessionID_CodexSessionIDPriorityOverClientRequestID(t *testing.T
 
 	headers := make(http.Header)
 	headers.Set("X-Client-Request-Id", "pi-session-123")
-	headers.Set("Session_id", "codex-session-456")
+	headers.Set("Session-Id", "codex-session-456")
 
 	got := ExtractSessionID(headers, nil, nil)
 	want := "codex:codex-session-456"
 	if got != want {
-		t.Errorf("ExtractSessionID() = %q, want %q (Session_id should take priority over X-Client-Request-Id)", got, want)
+		t.Errorf("ExtractSessionID() = %q, want %q (Session-Id should take priority over X-Client-Request-Id)", got, want)
 	}
 }
 

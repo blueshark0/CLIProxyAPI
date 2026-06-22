@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/andybalholm/brotli"
 	"github.com/google/uuid"
@@ -1746,11 +1747,11 @@ const fingerprintSalt = "59cf53e54c78"
 // Algorithm: SHA256(salt + messageText[4] + messageText[7] + messageText[20] + version)[:3]
 func computeFingerprint(messageText, version string) string {
 	indices := [3]int{4, 7, 20}
-	runes := []rune(messageText)
+	units := utf16.Encode([]rune(messageText))
 	var sb strings.Builder
 	for _, idx := range indices {
-		if idx < len(runes) {
-			sb.WriteRune(runes[idx])
+		if idx < len(units) {
+			sb.WriteRune(rune(units[idx]))
 		} else {
 			sb.WriteRune('0')
 		}
@@ -1994,6 +1995,9 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	// Skip system instructions for claude-3-5-haiku models
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
 		billingVersion := helps.DefaultClaudeVersion(cfg)
+		if useCCHSigning {
+			billingVersion = claudeCCHWorkerVersion
+		}
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
 		workload := getWorkloadFromContext(ctx)
 		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)

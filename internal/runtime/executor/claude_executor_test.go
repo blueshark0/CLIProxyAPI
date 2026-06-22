@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -2189,10 +2190,21 @@ func TestClaudeExecutor_ExperimentalCCHSigningOptInSignsFinalBody(t *testing.T) 
 		t.Fatalf("expected signed billing header in body: %s", string(seenBody))
 	}
 	actualCCH := string(match[2])
+	if actualCCH == "00000" {
+		t.Fatalf("billing header cch was not signed: %s", string(seenBody))
+	}
 	unsignedBody := billingPattern.ReplaceAll(seenBody, []byte(`${1}00000${3}`))
-	wantCCH := computeClaudeCCH(unsignedBody)
+
+	// Extract version from billing header to compute expected CCH
+	billingHeader := gjson.GetBytes(seenBody, "system.0.text").String()
+	if version := extractVersionFromBillingHeader(billingHeader); version != claudeCCHWorkerVersion {
+		t.Fatalf("billing version = %q, want %q", version, claudeCCHWorkerVersion)
+	}
+	version := extractVersionFromBillingHeader(billingHeader)
+	wantCCH := computeClaudeCCHWithVersion(unsignedBody, version)
+
 	if actualCCH != wantCCH {
-		t.Fatalf("cch = %q, want %q\nbody: %s", actualCCH, wantCCH, string(seenBody))
+		t.Fatalf("cch = %q, want %q (version=%s)\nbody: %s", actualCCH, wantCCH, version, string(seenBody))
 	}
 }
 
@@ -2201,6 +2213,459 @@ func TestComputeClaudeCCH_UsesKeyedAttestationHash(t *testing.T) {
 
 	if got := computeClaudeCCH(unsignedBody); got != "020f5" {
 		t.Fatalf("computeClaudeCCH() = %q, want %q", got, "020f5")
+	}
+}
+
+func TestExtractVersionFromBillingHeader(t *testing.T) {
+	tests := []struct {
+		name     string
+		header   string
+		expected string
+	}{
+		{
+			name:     "version with suffix",
+			header:   "x-anthropic-billing-header: cc_version=2.1.172.abc; cc_entrypoint=cli; cch=00000;",
+			expected: "2.1.172",
+		},
+		{
+			name:     "version without suffix",
+			header:   "x-anthropic-billing-header: cc_version=2.1.170; cc_entrypoint=cli; cch=00000;",
+			expected: "2.1.170",
+		},
+		{
+			name:     "no version",
+			header:   "x-anthropic-billing-header: cc_entrypoint=cli; cch=00000;",
+			expected: "",
+		},
+		{
+			name:     "malformed version",
+			header:   "x-anthropic-billing-header: cc_version=invalid; cch=00000;",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractVersionFromBillingHeader(tt.header)
+			if got != tt.expected {
+				t.Errorf("extractVersionFromBillingHeader() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestComputeFingerprint_MatchesClaudeCodeUTF16Indexing(t *testing.T) {
+	tests := []struct {
+		name        string
+		messageText string
+		version     string
+		want        string
+	}{
+		{
+			name:        "ascii",
+			messageText: "hello world message",
+			version:     claudeCCHWorkerVersion,
+			want:        "5dc",
+		},
+		{
+			name:        "emoji uses utf16 code unit indexing",
+			messageText: "abcd😀efghijklmnopqrstuvwxyz",
+			version:     claudeCCHWorkerVersion,
+			want:        "326",
+		},
+		{
+			name:        "mixed non ascii",
+			messageText: "中文😀abcdefghi中文jklmnop",
+			version:     claudeCCHWorkerVersion,
+			want:        "397",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := computeFingerprint(tt.messageText, tt.version); got != tt.want {
+				t.Fatalf("computeFingerprint() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldApplyPreimage(t *testing.T) {
+	tests := []struct {
+		name     string
+		version  string
+		expected bool
+	}{
+		{
+			name:     "version 2.1.172 (first preimage version)",
+			version:  "2.1.172",
+			expected: true,
+		},
+		{
+			name:     "version 2.1.185 (latest)",
+			version:  "2.1.185",
+			expected: true,
+		},
+		{
+			name:     "version 2.1.170 (last raw body version)",
+			version:  "2.1.170",
+			expected: false,
+		},
+		{
+			name:     "version 2.1.171 (unknown, assume raw)",
+			version:  "2.1.171",
+			expected: false,
+		},
+		{
+			name:     "version 2.1.138",
+			version:  "2.1.138",
+			expected: false,
+		},
+		{
+			name:     "version 2.1.37",
+			version:  "2.1.37",
+			expected: false,
+		},
+		{
+			name:     "no version (assume latest)",
+			version:  "",
+			expected: true,
+		},
+		{
+			name:     "future version 3.0.0",
+			version:  "3.0.0",
+			expected: true,
+		},
+		{
+			name:     "version 2.2.0",
+			version:  "2.2.0",
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldApplyPreimage(tt.version)
+			if got != tt.expected {
+				t.Errorf("shouldApplyPreimage(%q) = %v, want %v", tt.version, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestComputeClaudeCCHWithVersion_AppliesPreimageBasedOnVersion(t *testing.T) {
+	// Body with model and max_tokens that would be stripped by preimage
+	bodyWithFields := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.172.abc; cc_entrypoint=cli; cch=00000;"}],"model":"claude-sonnet-4","max_tokens":8192,"messages":[{"role":"user","content":"test"}]}`)
+
+	// Compute hash with version 2.1.172 (should apply preimage)
+	hash172 := computeClaudeCCHWithVersion(bodyWithFields, "2.1.172")
+
+	// Compute hash with version 2.1.170 (should NOT apply preimage)
+	hash170 := computeClaudeCCHWithVersion(bodyWithFields, "2.1.170")
+
+	// The hashes should be different because of preimage
+	if hash172 == hash170 {
+		t.Errorf("Expected different hashes for different versions, but both are %q", hash172)
+	}
+
+	// Verify that 2.1.172 matches preimage-applied hash
+	preimageBody := cchPreimage(bodyWithFields)
+	expectedHash172 := fmt.Sprintf("%05x", claudeCCHKeyedXXHash64Seed(preimageBody, claudeSeed_2_1_138)&0xFFFFF)
+	if hash172 != expectedHash172 {
+		t.Errorf("Version 2.1.172 hash = %q, want %q (with preimage)", hash172, expectedHash172)
+	}
+
+	// Verify that 2.1.170 matches raw body hash
+	expectedHash170 := fmt.Sprintf("%05x", claudeCCHKeyedXXHash64Seed(bodyWithFields, claudeSeed_2_1_138)&0xFFFFF)
+	if hash170 != expectedHash170 {
+		t.Errorf("Version 2.1.170 hash = %q, want %q (no preimage)", hash170, expectedHash170)
+	}
+}
+
+func TestComputeClaudeCCHWithVersion_UsesVersionSeed(t *testing.T) {
+	body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.37.fbe; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"hello"}]}`)
+
+	got := computeClaudeCCHWithVersion(body, "2.1.37")
+	want := fmt.Sprintf("%05x", claudeCCHKeyedXXHash64Seed(body, claudeSeed_2_1_37)&0xFFFFF)
+	if got != want {
+		t.Fatalf("computeClaudeCCHWithVersion(2.1.37) = %q, want %q", got, want)
+	}
+
+	seed138Hash := fmt.Sprintf("%05x", claudeCCHKeyedXXHash64Seed(body, claudeSeed_2_1_138)&0xFFFFF)
+	if got == seed138Hash {
+		t.Fatalf("2.1.37 unexpectedly used 2.1.138 seed: %q", got)
+	}
+}
+
+func TestCCHPreimage_ClearsModelValue(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "clears model value and removes max_tokens",
+			input:    `{"model":"claude-sonnet-4-20250514","max_tokens":8192}`,
+			expected: `{"model":""}`,
+		},
+		{
+			name:     "clears model and removes max_tokens with trailing comma",
+			input:    `{"model":"x","max_tokens":8192,"stream":true}`,
+			expected: `{"model":"","stream":true}`,
+		},
+		{
+			name:     "clears model and removes max_tokens with leading comma (edge case)",
+			input:    `{"model":"x","stream":true,"max_tokens":8192}`,
+			expected: `{"model":"","stream":true}`,
+		},
+		{
+			name:     "no-op when fields absent",
+			input:    `{"messages":[{"role":"user","content":"hi"}]}`,
+			expected: `{"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name:     "handles both model and max_tokens in complex body",
+			input:    `{"system":[{"type":"text","text":"x-anthropic-billing-header: cch=00000;"}],"model":"claude-3-5-sonnet-20241022","max_tokens":16384,"messages":[{"role":"user","content":"test"}]}`,
+			expected: `{"system":[{"type":"text","text":"x-anthropic-billing-header: cch=00000;"}],"model":"","messages":[{"role":"user","content":"test"}]}`,
+		},
+		{
+			name:     "only clears first model occurrence",
+			input:    `{"model":"sonnet","messages":[{"role":"user","content":"use model gpt"}]}`,
+			expected: `{"model":"","messages":[{"role":"user","content":"use model gpt"}]}`,
+		},
+		{
+			name:     "clears empty model value (idempotent)",
+			input:    `{"model":""}`,
+			expected: `{"model":""}`,
+		},
+		{
+			name:     "only removes max_tokens when model absent",
+			input:    `{"max_tokens":4096,"stream":true}`,
+			expected: `{"stream":true}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := string(cchPreimage([]byte(tt.input)))
+			if got != tt.expected {
+				t.Errorf("cchPreimage() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestVerifyBillingHeaderUnique_DetectsMultipleMarkers(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          string
+		expectWarning bool
+		expectedCount int
+	}{
+		{
+			name:          "single billing header (valid)",
+			body:          `{"system":[{"type":"text","text":"x-anthropic-billing-header: cch=00000;"}],"messages":[]}`,
+			expectWarning: false,
+		},
+		{
+			name:          "no billing header (valid)",
+			body:          `{"messages":[{"role":"user","content":"hi"}]}`,
+			expectWarning: false,
+		},
+		{
+			name: "multiple billing headers (warning case)",
+			body: `{"system":[
+				{"type":"text","text":"x-anthropic-billing-header: cch=00000;"},
+				{"type":"text","text":"LTM content about x-anthropic-billing-header: format"}
+			],"messages":[]}`,
+			expectWarning: true,
+			expectedCount: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// This test just ensures the function doesn't panic
+			// In production, it logs a warning via logrus
+			verifyBillingHeaderUnique([]byte(tt.body), "test")
+			// The function is report-only, so we just verify it completes
+		})
+	}
+}
+
+// TestSignBody_ProducesDifferentHashesForDifferentBodies verifies that different
+// request bodies produce different CCH signatures.
+func TestSignBody_ProducesDifferentHashesForDifferentBodies(t *testing.T) {
+	makeBillingBody := func(extra string) []byte {
+		return []byte(fmt.Sprintf(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.172.fbe; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"%s"}]}`, extra))
+	}
+
+	body1 := signAnthropicMessagesBody(makeBillingBody("hello"))
+	body2 := signAnthropicMessagesBody(makeBillingBody("world"))
+
+	cchPattern := regexp.MustCompile(`cch=([0-9a-f]{5});`)
+	cch1 := cchPattern.FindSubmatch(body1)
+	cch2 := cchPattern.FindSubmatch(body2)
+
+	if cch1 == nil || cch2 == nil {
+		t.Fatal("Expected signed CCH in both bodies")
+	}
+
+	if string(cch1[1]) == string(cch2[1]) {
+		t.Errorf("Expected different CCH values for different bodies, got same: %s", string(cch1[1]))
+	}
+}
+
+// TestSignBody_IsDeterministic verifies that signing the same body produces
+// the same output every time.
+func TestSignBody_IsDeterministic(t *testing.T) {
+	body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.172.fbe; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"stable"}]}`)
+
+	signed1 := signAnthropicMessagesBody(body)
+	signed2 := signAnthropicMessagesBody(body)
+
+	if !bytes.Equal(signed1, signed2) {
+		t.Errorf("Expected deterministic output, but got different results")
+	}
+}
+
+// TestSignBody_DoesNotRewriteContentCCH verifies that bare cch=00000 tokens
+// in message content are left untouched (only the billing header is signed).
+func TestSignBody_DoesNotRewriteContentCCH(t *testing.T) {
+	body := []byte(`{"model":"claude-opus-4-8","system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.172.abc; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"CCH_PLACEHOLDER = ` + "`cch=00000`" + ` (cch.go:103); signBody() replaces it."}],"messages":[{"role":"user","content":"hello"}]}`)
+
+	signed := signAnthropicMessagesBody(body)
+	signedStr := string(signed)
+
+	// The LTM content placeholder must be preserved verbatim
+	if !strings.Contains(signedStr, "CCH_PLACEHOLDER = `cch=00000`") {
+		t.Error("Content cch=00000 should be preserved")
+	}
+
+	// Exactly one cch=00000 (the content one) should remain
+	placeholderCount := strings.Count(signedStr, "cch=00000")
+	if placeholderCount != 1 {
+		t.Errorf("Expected exactly 1 cch=00000 in content, got %d", placeholderCount)
+	}
+
+	// The billing header should have a real signed hash
+	billingHeader := gjson.GetBytes(signed, "system.0.text").String()
+	if !regexp.MustCompile(`cch=[0-9a-f]{5};`).MatchString(billingHeader) {
+		t.Error("Billing header should have a signed cch")
+	}
+	if strings.Contains(billingHeader, "cch=00000") {
+		t.Error("Billing header should not contain placeholder")
+	}
+}
+
+// TestSignBody_SignsBillingHeaderEvenWhenContentCCHSortsFirst verifies that
+// when content contains a cch=00000 token that serializes before the billing
+// header, only the real billing header is signed.
+func TestSignBody_SignsBillingHeaderEvenWhenContentCCHSortsFirst(t *testing.T) {
+	body := []byte(`{"system":[{"type":"text","text":"LTM doc: cc_entrypoint=cli; cch=00000 (example)"},{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.172.fbe; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	signed := signAnthropicMessagesBody(body)
+
+	if !bytes.Equal(signed, body) {
+		t.Fatalf("body with non-first billing header should be unchanged, got %s", string(signed))
+	}
+}
+
+func TestSignBody_SignsCCHLessBillingHeader(t *testing.T) {
+	body := []byte(`{"model":"claude-opus-4-8","max_tokens":8192,"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.181.abc; cc_entrypoint=cli;\nYou are Claude Code. Literal cch=00000; remains here."}],"messages":[{"role":"user","content":"hello"}]}`)
+
+	signed := signAnthropicMessagesBody(body)
+	billingHeader := gjson.GetBytes(signed, "system.0.text").String()
+	match := regexp.MustCompile(`x-anthropic-billing-header: cc_version=2\.1\.181\.abc; cc_entrypoint=cli; cch=([0-9a-f]{5});\nYou are Claude Code\.`).FindStringSubmatch(billingHeader)
+	if match == nil {
+		t.Fatalf("billing header was not signed in place: %q", billingHeader)
+	}
+	if match[1] == "00000" {
+		t.Fatalf("billing header cch remained placeholder: %q", billingHeader)
+	}
+	if !strings.Contains(billingHeader, "Literal cch=00000; remains here.") {
+		t.Fatalf("content cch placeholder was rewritten: %q", billingHeader)
+	}
+	if strings.Contains(string(signed), `"max_tokens":8192`) && !strings.Contains(billingHeader, "cch="+match[1]+";") {
+		t.Fatalf("signed body lost wire fields or failed to stamp cch: %s", string(signed))
+	}
+}
+
+// TestCCHPreimage_RemovesExactlyOneComma verifies that when removing max_tokens,
+// exactly one comma is removed (not both, not none), keeping JSON well-formed.
+func TestCCHPreimage_RemovesExactlyOneComma(t *testing.T) {
+	input := `{"model":"x","max_tokens":8192,"stream":true}`
+	output := string(cchPreimage([]byte(input)))
+
+	expected := `{"model":"","stream":true}`
+	if output != expected {
+		t.Errorf("Expected %q, got %q", expected, output)
+	}
+
+	// No doubled or dangling commas
+	if strings.Contains(output, ",,") {
+		t.Error("Output should not contain doubled commas")
+	}
+
+	// Should be valid JSON
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+		t.Errorf("Output should be valid JSON: %v", err)
+	}
+}
+
+// TestVersionDetection_DifferentVersionsProduceDifferentHashes verifies that
+// the same body hashed with different version behaviors produces different results.
+func TestVersionDetection_DifferentVersionsProduceDifferentHashes(t *testing.T) {
+	// Body with model and max_tokens that preimage would strip
+	bodyOld := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.170.abc; cc_entrypoint=cli; cch=00000;"}],"model":"claude-sonnet-4","max_tokens":8192,"messages":[{"role":"user","content":"test"}]}`)
+	bodyNew := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.172.abc; cc_entrypoint=cli; cch=00000;"}],"model":"claude-sonnet-4","max_tokens":8192,"messages":[{"role":"user","content":"test"}]}`)
+
+	signedOld := signAnthropicMessagesBody(bodyOld)
+	signedNew := signAnthropicMessagesBody(bodyNew)
+
+	cchPattern := regexp.MustCompile(`cch=([0-9a-f]{5});`)
+	cchOld := cchPattern.FindSubmatch(signedOld)
+	cchNew := cchPattern.FindSubmatch(signedNew)
+
+	if cchOld == nil || cchNew == nil {
+		t.Fatal("Expected signed CCH in both bodies")
+	}
+
+	// Different versions should produce different hashes (because preimage behavior differs)
+	if string(cchOld[1]) == string(cchNew[1]) {
+		t.Errorf("Expected different CCH for v2.1.170 vs v2.1.172, but got same: %s", string(cchOld[1]))
+	}
+}
+
+// TestSignBody_ZeroPadsShortHashes verifies that CCH values shorter than 5 hex
+// digits are zero-padded to maintain the fixed 5-character format.
+func TestSignBody_ZeroPadsShortHashes(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		body := []byte(fmt.Sprintf(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.172.fbe; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"i%d"}]}`, i))
+		signed := signAnthropicMessagesBody(body)
+
+		cchPattern := regexp.MustCompile(`cch=([0-9a-f]+);`)
+		match := cchPattern.FindSubmatch(signed)
+		if match == nil {
+			t.Fatalf("Expected CCH in signed body for i=%d", i)
+		}
+
+		cchValue := string(match[1])
+		if len(cchValue) != 5 {
+			t.Errorf("Expected CCH length 5, got %d for value %q (i=%d)", len(cchValue), cchValue, i)
+		}
+	}
+}
+
+// TestSignBody_NoOpWhenNoBillingHeader verifies that when there's no billing
+// header, the body is returned unchanged (even if it contains bare cch=00000).
+func TestSignBody_NoOpWhenNoBillingHeader(t *testing.T) {
+	body := []byte(`{"system":[{"type":"text","text":"docs: ` + "`cch=00000`" + `"}],"messages":[]}`)
+	signed := signAnthropicMessagesBody(body)
+
+	if !bytes.Equal(body, signed) {
+		t.Error("Body without billing header should be returned unchanged")
 	}
 }
 

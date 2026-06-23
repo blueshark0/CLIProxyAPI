@@ -48,6 +48,23 @@ func TestClaudeErrorExtractsClaudeStyleUpstreamJSON(t *testing.T) {
 	}
 }
 
+func TestClaudeErrorRewritesUnauthorizedMessage(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusUnauthorized,
+		Error:      errors.New(`{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`),
+	}
+
+	got := handler.toClaudeError(msg)
+
+	if got.Error.Type != "authentication_error" {
+		t.Fatalf("error.type = %q, want authentication_error", got.Error.Type)
+	}
+	if got.Error.Message != claudeUnauthorizedErrorMessage {
+		t.Fatalf("error.message = %q, want %q", got.Error.Message, claudeUnauthorizedErrorMessage)
+	}
+}
+
 func TestWriteClaudeErrorResponseUsesClaudeEnvelope(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -72,6 +89,33 @@ func TestWriteClaudeErrorResponseUsesClaudeEnvelope(t *testing.T) {
 	}
 	if got := gjson.GetBytes(body, "error.message").String(); got != "Your input exceeds the context window of this model. Please adjust your input and try again." {
 		t.Fatalf("error.message = %q; body=%s", got, body)
+	}
+}
+
+func TestWriteClaudeErrorResponseRewritesUnauthorizedMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusUnauthorized,
+		Error:      errors.New(`{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`),
+	}
+
+	handler.WriteErrorResponse(c, msg)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+	body := recorder.Body.Bytes()
+	if got := gjson.GetBytes(body, "type").String(); got != "error" {
+		t.Fatalf("type = %q, want error; body=%s", got, body)
+	}
+	if got := gjson.GetBytes(body, "error.type").String(); got != "authentication_error" {
+		t.Fatalf("error.type = %q, want authentication_error; body=%s", got, body)
+	}
+	if got := gjson.GetBytes(body, "error.message").String(); got != claudeUnauthorizedErrorMessage {
+		t.Fatalf("error.message = %q, want %q; body=%s", got, claudeUnauthorizedErrorMessage, body)
 	}
 }
 

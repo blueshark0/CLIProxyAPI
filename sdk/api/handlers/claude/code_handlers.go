@@ -342,6 +342,8 @@ type claudeErrorResponse struct {
 	Error claudeErrorDetail `json:"error"`
 }
 
+const claudeUnauthorizedErrorMessage = "some thing went wrong"
+
 func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
@@ -357,6 +359,9 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 		}
 	}
 	errType, message := claudeErrorDetailFromText(status, errText)
+	if status == http.StatusUnauthorized {
+		message = claudeUnauthorizedErrorMessage
+	}
 	return claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{

@@ -25,6 +25,10 @@ const (
 	apiResponseKey          = "API_RESPONSE"
 	apiWebsocketTimelineKey = "API_WEBSOCKET_TIMELINE"
 	creditsUsedKey          = "__antigravity_credits_used__"
+	// apiErrorOnlyLogKey marks requests where full request logging is disabled but a
+	// forced error-only log may still be written; bounded upstream request/response
+	// metadata must be captured so that log can render the API REQUEST/RESPONSE sections.
+	apiErrorOnlyLogKey = "API_LOG_ERROR_ONLY"
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
@@ -51,15 +55,13 @@ type upstreamAttempt struct {
 	bodyHasContent       bool
 	prevWasSSEEvent      bool
 	errorWritten         bool
+	statusIsError        bool
 }
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
-	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	ginCtx, ok := shouldRecordBounded(ctx, cfg)
+	if !ok {
 		return
 	}
 
@@ -103,15 +105,17 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
-	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	ginCtx, ok := shouldRecordBounded(ctx, cfg)
+	if !ok {
 		return
 	}
 	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
+
+	// Flag non-2xx responses so error-only mode knows the upstream body is worth capturing.
+	if status > 0 && (status < 200 || status >= 300) {
+		attempt.statusIsError = true
+	}
 
 	if status > 0 && !attempt.statusWritten {
 		attempt.response.WriteString(fmt.Sprintf("Status: %d\n", status))
@@ -129,11 +133,11 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 
 // RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
 func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	if cfg == nil || !cfg.RequestLog || err == nil {
+	if err == nil {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
+	ginCtx, ok := shouldRecordBounded(ctx, cfg)
+	if !ok {
 		return
 	}
 	attempts, attempt := ensureAttempt(ginCtx)
@@ -154,9 +158,6 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	data := bytes.TrimSpace(chunk)
 	if len(data) == 0 {
 		return
@@ -164,6 +165,13 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
+	}
+	if cfg == nil || !cfg.RequestLog {
+		// Error-only mode: only buffer response bytes once the attempt is known to be an
+		// error, so successful streaming responses are never accumulated in memory.
+		if !errorOnlyLoggingEnabled(ginCtx) || !attemptHasError(ginCtx) {
+			return
+		}
 	}
 	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
@@ -334,6 +342,46 @@ func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage stri
 func ginContextFrom(ctx context.Context) *gin.Context {
 	ginCtx, _ := ctx.Value("gin").(*gin.Context)
 	return ginCtx
+}
+
+// errorOnlyLoggingEnabled reports whether the current request runs in error-only logging
+// mode, where bounded upstream metadata must be captured for a possible forced error log.
+func errorOnlyLoggingEnabled(ginCtx *gin.Context) bool {
+	if ginCtx == nil {
+		return false
+	}
+	if value, exists := ginCtx.Get(apiErrorOnlyLogKey); exists {
+		if enabled, ok := value.(bool); ok {
+			return enabled
+		}
+	}
+	return false
+}
+
+// shouldRecordBounded reports whether bounded upstream metadata (request line/headers/body,
+// response status/headers, error lines) should be captured. It returns true when full
+// request logging is enabled, or when error-only logging is active for this request. The
+// returned gin.Context is the one carried by ctx (nil when absent).
+func shouldRecordBounded(ctx context.Context, cfg *config.Config) (*gin.Context, bool) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return nil, false
+	}
+	if cfg != nil && cfg.RequestLog {
+		return ginCtx, true
+	}
+	return ginCtx, errorOnlyLoggingEnabled(ginCtx)
+}
+
+// attemptHasError reports whether the latest upstream attempt has recorded an error or a
+// non-2xx status, indicating its response body is worth capturing in an error-only log.
+func attemptHasError(ginCtx *gin.Context) bool {
+	attempts := getAttempts(ginCtx)
+	if len(attempts) == 0 {
+		return false
+	}
+	attempt := attempts[len(attempts)-1]
+	return attempt != nil && (attempt.errorWritten || attempt.statusIsError)
 }
 
 func getAttempts(ginCtx *gin.Context) []*upstreamAttempt {

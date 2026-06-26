@@ -56,6 +56,10 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
+			// Let executor logging helpers capture bounded upstream request/response metadata
+			// even when full request logging is off, so a forced error log can render the
+			// API REQUEST/RESPONSE sections.
+			c.Set("API_LOG_ERROR_ONLY", true)
 		}
 		c.Writer = wrapper
 		attachWebsocketLogSources(c, logger, loggerEnabled)

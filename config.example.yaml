@@ -11,6 +11,16 @@ tls:
   cert: ""
   key: ""
 
+# Additional CA certificate trusted when the proxy connects to upstream providers.
+# Unlike the `tls` block above (which secures inbound connections), this trusts an
+# extra CA for OUTBOUND requests. When enabled, the PEM file at `path` is loaded into
+# an in-process trust pool alongside the system trust store. Manage it via the
+# management API (/v0/management/trusted-ca), which also installs it into the system
+# trust store on Linux on a best-effort basis.
+trusted-ca-cert:
+  enable: false
+  path: ""
+
 # Management API settings
 remote-management:
   # Whether to allow remote (non-localhost) management access.

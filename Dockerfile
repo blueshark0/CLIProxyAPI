@@ -16,7 +16,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X 'main.Version=${VERSION
 
 FROM alpine:3.23
 
-RUN apk add --no-cache tzdata
+# ca-certificates provides the system trust store and the update-ca-certificates
+# tool, which the proxy uses to install additional trusted CA certificates.
+RUN apk add --no-cache tzdata ca-certificates
+
+# Directory scanned by update-ca-certificates for additional trusted CAs.
+RUN mkdir -p /usr/local/share/ca-certificates
 
 RUN mkdir /CLIProxyAPI
 

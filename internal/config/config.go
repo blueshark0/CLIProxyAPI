@@ -37,6 +37,11 @@ type Config struct {
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
+	// TrustedCACert configures an additional CA certificate that is trusted when
+	// the proxy issues requests to upstream providers. It is independent from the
+	// HTTPS server settings above (which control inbound connections).
+	TrustedCACert TrustedCACertConfig `yaml:"trusted-ca-cert" json:"trusted-ca-cert"`
+
 	// Home config is runtime-only and is populated from -home-jwt.
 	Home HomeConfig `yaml:"-" json:"-"`
 
@@ -180,6 +185,16 @@ type TLSConfig struct {
 	Cert string `yaml:"cert" json:"cert"`
 	// Key is the path to the TLS private key file.
 	Key string `yaml:"key" json:"key"`
+}
+
+// TrustedCACertConfig holds settings for an additional CA certificate trusted
+// for outbound (upstream) requests. When enabled, the certificate at Path is
+// loaded into an in-process trust pool alongside the system trust store.
+type TrustedCACertConfig struct {
+	// Enable toggles whether the configured CA certificate is trusted for upstream requests.
+	Enable bool `yaml:"enable" json:"enable"`
+	// Path is the filesystem path to the PEM-encoded CA certificate.
+	Path string `yaml:"path" json:"path"`
 }
 
 // PprofConfig holds pprof HTTP server settings.

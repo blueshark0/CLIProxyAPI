@@ -2,11 +2,13 @@ package helps
 
 import (
 	"context"
+	"crypto/tls"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/upstreamtls"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -46,6 +48,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
+			applyTrustedCAToTransport(transport)
 			httpClient.Transport = transport
 			return httpClient
 		}
@@ -55,10 +58,51 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+		if transport, isTransport := rt.(*http.Transport); isTransport {
+			applyTrustedCAToTransport(transport)
+		}
 		httpClient.Transport = rt
+		return httpClient
+	}
+
+	// No proxy and no context transport: when an additional CA is trusted, attach
+	// a transport carrying the in-process trust pool. Otherwise leave Transport
+	// nil so the standard library default (system trust store) is used.
+	if pool := upstreamtls.RootCAs(); pool != nil {
+		transport := defaultTransportClone()
+		transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+		httpClient.Transport = transport
 	}
 
 	return httpClient
+}
+
+// applyTrustedCAToTransport injects the in-process trusted CA pool into the
+// transport's TLS configuration when an additional CA certificate is configured.
+// It preserves any existing TLS settings on the transport.
+func applyTrustedCAToTransport(transport *http.Transport) {
+	if transport == nil {
+		return
+	}
+	pool := upstreamtls.RootCAs()
+	if pool == nil {
+		return
+	}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	transport.TLSClientConfig.RootCAs = pool
+}
+
+// defaultTransportClone returns a clone of the standard library default
+// transport, or a fresh transport when the default is unavailable.
+func defaultTransportClone() *http.Transport {
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok && dt != nil {
+		return dt.Clone()
+	}
+	return &http.Transport{}
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

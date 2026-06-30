@@ -13,6 +13,7 @@ import (
 
 	tls "github.com/refraction-networking/utls"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/upstreamtls"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -91,6 +92,9 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	}
 
 	tlsConfig := &tls.Config{ServerName: host, NextProtos: []string{"h2", "http/1.1"}}
+	if pool := upstreamtls.RootCAs(); pool != nil {
+		tlsConfig.RootCAs = pool
+	}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
 	if err := tlsConn.Handshake(); err != nil {
@@ -148,6 +152,9 @@ func (t *utlsRoundTripper) roundTripHTTP1(req *http.Request, host, addr string) 
 	}
 
 	tlsConfig := &tls.Config{ServerName: host, NextProtos: []string{"http/1.1"}}
+	if pool := upstreamtls.RootCAs(); pool != nil {
+		tlsConfig.RootCAs = pool
+	}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 	if err := tlsConn.Handshake(); err != nil {
 		_ = conn.Close()
@@ -232,6 +239,11 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 		if transport := buildProxyTransport(proxyURL); transport != nil {
 			standardTransport = transport
 		}
+	}
+	// Trust the additional CA on the fallback transport (used for non-Anthropic
+	// hosts) when one is configured.
+	if transport, ok := standardTransport.(*http.Transport); ok {
+		applyTrustedCAToTransport(transport)
 	}
 
 	client := &http.Client{

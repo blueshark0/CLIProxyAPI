@@ -22,6 +22,9 @@ objectstore/*
 # Static assets
 static/*
 
+# Embedded management panel (frontend build artifact)
+internal/managementasset/management.html
+
 # Authentication data
 auths/*
 !auths/.gitkeep

@@ -166,10 +166,11 @@ type Server struct {
 	currentPath string
 
 	// wsRoutes tracks registered websocket upgrade paths.
-	wsRouteMu     sync.Mutex
-	wsRoutes      map[string]struct{}
-	wsAuthChanged func(bool, bool)
-	wsAuthEnabled atomic.Bool
+	wsRouteMu      sync.Mutex
+	wsRoutes       map[string]struct{}
+	wsAuthChanged  func(bool, bool)
+	wsAuthEnabled  atomic.Bool
+	allowedDomains *allowedDomainFilter
 
 	// management handler
 	mgmt *managementHandlers.Handler
@@ -221,10 +222,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if optionState.engineConfigurator != nil {
 		optionState.engineConfigurator(engine)
 	}
+	allowedDomains := newAllowedDomainFilter(cfg.AllowedDomains)
 
 	// Add middleware
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
+	engine.Use(allowedDomains.Middleware())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
@@ -267,6 +270,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		currentPath:         wd,
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
+		allowedDomains:      allowedDomains,
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
@@ -1436,6 +1440,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	redisqueue.SetEnabled(s.managementRoutesEnabled.Load() || (cfg != nil && cfg.Home.Enabled))
 
 	s.applyAccessConfig(oldCfg, cfg)
+	if s.allowedDomains != nil {
+		s.allowedDomains.Set(cfg.AllowedDomains)
+	}
 	s.cfg = cfg
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {

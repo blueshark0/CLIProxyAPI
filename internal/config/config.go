@@ -33,6 +33,9 @@ type Config struct {
 	Host string `yaml:"host" json:"-"`
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
+	// AllowedDomains limits HTTP requests to the configured Host names.
+	// An empty list allows requests for any Host.
+	AllowedDomains []string `yaml:"allowed-domains,omitempty" json:"allowed-domains,omitempty"`
 
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`

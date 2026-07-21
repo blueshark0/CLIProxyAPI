@@ -113,7 +113,7 @@ func TestForceHomeRuntimeConfigEnablesUsageStatistics(t *testing.T) {
 }
 
 func TestApplyHomeOverlayForcesUsageStatisticsEnabled(t *testing.T) {
-	baseCfg := &config.Config{}
+	baseCfg := &config.Config{AllowedDomains: []string{"api.example.com"}}
 	baseCfg.Home.Enabled = true
 	service := &Service{cfg: baseCfg}
 
@@ -126,5 +126,8 @@ func TestApplyHomeOverlayForcesUsageStatisticsEnabled(t *testing.T) {
 	}
 	if !service.cfg.Home.Enabled {
 		t.Fatal("expected home overlay to preserve local home settings")
+	}
+	if len(service.cfg.AllowedDomains) != 1 || service.cfg.AllowedDomains[0] != "api.example.com" {
+		t.Fatalf("expected home overlay to preserve local allowed domains, got %v", service.cfg.AllowedDomains)
 	}
 }

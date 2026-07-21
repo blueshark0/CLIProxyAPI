@@ -5,6 +5,12 @@ host: ""
 # Server port
 port: 8317
 
+# Restrict service access to these HTTP Host domains. Ports, letter case, and a trailing dot are ignored.
+# Leave empty to allow any domain or IP address.
+allowed-domains: []
+# allowed-domains:
+#   - "api.example.com"
+
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false

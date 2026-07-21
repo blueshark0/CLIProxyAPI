@@ -21,6 +21,10 @@ import (
 )
 
 func newTestServer(t *testing.T) *Server {
+	return newTestServerWithConfig(t, nil)
+}
+
+func newTestServerWithConfig(t *testing.T, configure func(*proxyconfig.Config)) *Server {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
@@ -41,12 +45,87 @@ func newTestServer(t *testing.T) *Server {
 		LoggingToFile:          false,
 		UsageStatisticsEnabled: false,
 	}
+	if configure != nil {
+		configure(cfg)
+	}
 
 	authManager := auth.NewManager(nil, nil, nil)
 	accessManager := sdkaccess.NewManager()
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
+func TestAllowedDomains(t *testing.T) {
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.AllowedDomains = []string{" API.Example.com. "}
+	})
+
+	testCases := []struct {
+		name       string
+		method     string
+		host       string
+		wantStatus int
+	}{
+		{name: "allowed domain", method: http.MethodGet, host: "api.example.com", wantStatus: http.StatusOK},
+		{name: "allowed domain with port", method: http.MethodGet, host: "API.EXAMPLE.COM:8317", wantStatus: http.StatusOK},
+		{name: "other domain", method: http.MethodGet, host: "other.example.com", wantStatus: http.StatusNotFound},
+		{name: "IP address", method: http.MethodGet, host: "127.0.0.1:8317", wantStatus: http.StatusNotFound},
+		{name: "preflight for other domain", method: http.MethodOptions, host: "other.example.com", wantStatus: http.StatusNotFound},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/healthz", nil)
+			req.Host = tc.host
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d body=%q", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+			if tc.wantStatus == http.StatusNotFound && rr.Body.String() != "404 page not found\n" {
+				t.Fatalf("body = %q, want standard 404 page", rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestAllowedDomainsHotReload(t *testing.T) {
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.AllowedDomains = []string{"old.example.com"}
+	})
+
+	updated := *server.cfg
+	updated.AllowedDomains = []string{"new.example.com"}
+	server.UpdateClients(&updated)
+
+	for host, wantStatus := range map[string]int{
+		"old.example.com": http.StatusNotFound,
+		"new.example.com": http.StatusOK,
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		req.Host = host
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != wantStatus {
+			t.Fatalf("host %q status = %d, want %d body=%q", host, rr.Code, wantStatus, rr.Body.String())
+		}
+	}
+}
+
+func TestAllowedDomainsBlankEntryFailsClosed(t *testing.T) {
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.AllowedDomains = []string{" "}
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Host = "api.example.com"
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d body=%q", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
 }
 
 func TestHealthz(t *testing.T) {

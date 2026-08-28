@@ -1,359 +1,510 @@
 package executor
 
 import (
-	"encoding/binary"
+	"bytes"
+	"encoding/json"
 	"fmt"
-	"math/bits"
-	"regexp"
+	"net/url"
+	"sort"
 	"strings"
 
+	xxHash64 "github.com/pierrec/xxHash/xxHash64"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 const (
-	claudeCCHPrime64_1 uint64 = 0x9E3779B185EBCA87
-	claudeCCHPrime64_2 uint64 = 0xC2B2AE3D27D4EB4F
-	claudeCCHPrime64_3 uint64 = 0x165667B19E3779F9
-	claudeCCHPrime64_4 uint64 = 0x85EBCA77C2B2AE63
-	claudeCCHPrime64_5 uint64 = 0x27D4EB2F165667C5
-
-	// CCH attestation lanes for SEED_2_1_138.
-	// Extracted via oracle approach from Claude Code ARM64 macOS binaries.
-	// Reference: https://github.com/BYK/loreai
-	claudeCCHAttestV1 uint64 = 0xAE4FBA0790EAE83E
-	claudeCCHAttestV2 uint64 = 0x101840560AFF1DB7
-	claudeCCHAttestV3 uint64 = 0x4D659218E32A3268 // SEED_2_1_138 (used 2.1.138-2.1.185+)
-	claudeCCHAttestV4 uint64 = 0xAF2E18675D3E67E1
-
-	claudeCCHWorkerVersion = "2.1.185"
-
-	// Named seed constants for version mapping
-	claudeSeed_2_1_37  uint64 = 0x6E52736AC806831E
-	claudeSeed_2_1_138 uint64 = 0x4D659218E32A3268 // Same as AttestV3
+	claudeCCHSeed   uint64 = 0x4D659218E32A3268
+	claudeCCHLength        = 5
+	claudeCCHZero          = "00000"
 )
 
-// versionSeeds maps Claude Code versions to their xxHash64 seeds.
-// Seeds extracted via oracle approach from ARM64 macOS binaries.
-// Claude Code reuses the same seed across many consecutive versions.
-var versionSeeds = map[string]uint64{
-	"2.1.37":  claudeSeed_2_1_37,
-	"2.1.138": claudeSeed_2_1_138,
-	"2.1.139": claudeSeed_2_1_138,
-	"2.1.140": claudeSeed_2_1_138,
-	"2.1.141": claudeSeed_2_1_138,
-	"2.1.142": claudeSeed_2_1_138,
-	"2.1.143": claudeSeed_2_1_138,
-	"2.1.144": claudeSeed_2_1_138,
-	"2.1.145": claudeSeed_2_1_138,
-	"2.1.146": claudeSeed_2_1_138,
-	"2.1.147": claudeSeed_2_1_138,
-	"2.1.148": claudeSeed_2_1_138,
-	"2.1.149": claudeSeed_2_1_138,
-	"2.1.150": claudeSeed_2_1_138,
-	"2.1.152": claudeSeed_2_1_138,
-	"2.1.153": claudeSeed_2_1_138,
-	"2.1.154": claudeSeed_2_1_138,
-	"2.1.156": claudeSeed_2_1_138,
-	"2.1.157": claudeSeed_2_1_138,
-	"2.1.158": claudeSeed_2_1_138,
-	"2.1.159": claudeSeed_2_1_138,
-	"2.1.160": claudeSeed_2_1_138,
-	"2.1.161": claudeSeed_2_1_138,
-	"2.1.162": claudeSeed_2_1_138,
-	"2.1.163": claudeSeed_2_1_138,
-	"2.1.165": claudeSeed_2_1_138,
-	"2.1.166": claudeSeed_2_1_138,
-	"2.1.167": claudeSeed_2_1_138,
-	"2.1.168": claudeSeed_2_1_138,
-	"2.1.169": claudeSeed_2_1_138,
-	"2.1.170": claudeSeed_2_1_138,
-	// 2.1.172+: seed UNCHANGED, but the cch hash preimage changed - the binary
-	// strips the model value and the max_tokens field before hashing. See
-	// cchPreimage() for details.
-	"2.1.172": claudeSeed_2_1_138,
-	"2.1.173": claudeSeed_2_1_138,
-	"2.1.175": claudeSeed_2_1_138,
-	"2.1.176": claudeSeed_2_1_138,
-	"2.1.177": claudeSeed_2_1_138,
-	"2.1.178": claudeSeed_2_1_138,
-	"2.1.179": claudeSeed_2_1_138,
-	"2.1.181": claudeSeed_2_1_138,
-	"2.1.182": claudeSeed_2_1_138,
-	"2.1.183": claudeSeed_2_1_138,
-	"2.1.185": claudeSeed_2_1_138,
-	// Future versions: extract and add entries here
+type claudeCCHNormalizationEdit struct {
+	start int
+	end   int
 }
 
-var (
-	claudeBillingHeaderCCHPattern = regexp.MustCompile(`\bcch=([0-9a-fA-F]{5});`)
-	claudeBillingHeaderPattern    = regexp.MustCompile(`^x-anthropic-billing-header:\s*cc_version=[^;]*;\s*cc_entrypoint=[^;]*;(?:\s*cch=[0-9a-fA-F]{5};)?`)
+type claudeCCHJSONMember struct {
+	start       int
+	end         int
+	commaBefore int
+	commaAfter  int
+	excluded    bool
+}
+
+type claudeCCHJSONScanner struct {
+	body  []byte
+	pos   int
+	edits []claudeCCHNormalizationEdit
+}
+
+type claudeCCHUpstreamKind uint8
+
+const (
+	claudeCCHUpstreamOther claudeCCHUpstreamKind = iota
+	claudeCCHUpstreamAnthropic
+	claudeCCHUpstreamVertex
 )
 
-// ccVersionPattern extracts the version from the billing header
-// Format: cc_version=2.1.172.abc or cc_version=2.1.172
-var ccVersionPattern = regexp.MustCompile(`cc_version=(\d+\.\d+\.\d+)`)
-
-// Regular expressions for CCH preimage transformation (Claude Code >= 2.1.172)
-var (
-	// modelValueRE clears the model value: `"model":"<value>"` -> `"model":""`
-	// Matches the first occurrence only.
-	modelValueRE = regexp.MustCompile(`("model":")[^"]*(")`)
-
-	// maxTokensFieldRE removes the max_tokens field (key + integer value + one adjacent comma).
-	// Claude Code always emits max_tokens mid-object, so the trailing-comma form is standard.
-	// We match an optional LEADING comma as defensive fallback for last-key position.
-	// The alternation removes exactly ONE comma: trailing (standard) or leading (fallback).
-	maxTokensFieldRE = regexp.MustCompile(`"max_tokens":\d+,|,"max_tokens":\d+`)
-)
-
-const billingMarker = "x-anthropic-billing-header:"
-
-// extractVersionFromBillingHeader extracts the Claude Code version from the
-// billing header. Returns empty string if version not found.
-//
-// Example: "cc_version=2.1.172.abc; ..." -> "2.1.172"
-func extractVersionFromBillingHeader(billingHeader string) string {
-	matches := ccVersionPattern.FindStringSubmatch(billingHeader)
-	if len(matches) < 2 {
-		return ""
-	}
-	return matches[1]
-}
-
-// shouldApplyPreimage determines whether to apply preimage transformation
-// based on the Claude Code version extracted from the billing header.
-//
-// Version behavior:
-//   - <= 2.1.170: hash raw body (no preimage)
-//   - >= 2.1.172: hash preimage (strip model value, remove max_tokens)
-//   - 2.1.171: unknown (assume raw body for safety)
-//   - no version: apply preimage (assume latest behavior)
-func shouldApplyPreimage(version string) bool {
-	if version == "" {
-		// No version found: assume latest behavior (with preimage)
-		// This handles cases where billing header format doesn't include version
-		return true
-	}
-
-	// Parse semver
-	var major, minor, patch int
-	if _, err := fmt.Sscanf(version, "%d.%d.%d", &major, &minor, &patch); err != nil {
-		// Parse error: default to preimage for safety
-		return true
-	}
-
-	// Version comparison: >= 2.1.172 uses preimage
-	if major > 2 {
-		return true
-	}
-	if major == 2 && minor > 1 {
-		return true
-	}
-	if major == 2 && minor == 1 && patch >= 172 {
-		return true
-	}
-
-	// <= 2.1.170 (and 2.1.171 for safety)
-	return false
-}
-
-func cchSeedForVersion(version string) uint64 {
-	if seed, ok := versionSeeds[version]; ok {
-		return seed
-	}
-	return versionSeeds[claudeCCHWorkerVersion]
-}
-
-func claudeCCHKeyedXXHash64Seed(body []byte, seed uint64) uint64 {
-	return claudeCCHKeyedXXHash64(
-		body,
-		seed+claudeCCHPrime64_1+claudeCCHPrime64_2,
-		seed+claudeCCHPrime64_2,
-		seed,
-		seed-claudeCCHPrime64_1,
-	)
-}
-
-// cchPreimage transforms a serialized request body into the exact byte sequence
-// Claude Code (>= 2.1.172) feeds to xxHash64 when computing the cch billing hash.
-//
-// Discovered by capturing live hash input under a debugger: the binary does NOT
-// hash the raw wire body. It hashes the body with three edits applied:
-//  1. cch=<5hex> -> cch=00000 (the placeholder; callers usually pre-apply this)
-//  2. the model VALUE removed: `"model":"sonnet-4"` -> `"model":""`
-//  3. the max_tokens field removed: `"max_tokens":64000,` -> "" (with comma)
-//
-// The seed (0x4D659218E32A3268) and algorithm (XXHash64) are unchanged from
-// 2.1.166; only the preimage changed. Versions <= 2.1.170 hashed the whole body.
-// Both edits are no-ops when the field is absent (e.g. test bodies or worker
-// requests without max_tokens), keeping the function safe to apply unconditionally.
-//
-// Reference: https://github.com/BYK/loreai/blob/main/packages/gateway/src/cch.ts
-func cchPreimage(body []byte) []byte {
-	s := string(body)
-	// Clear model value: "model":"<value>" -> "model":""
-	s = modelValueRE.ReplaceAllString(s, "$1$2")
-	// Remove max_tokens field entirely (including one adjacent comma)
-	s = maxTokensFieldRE.ReplaceAllString(s, "")
-	return []byte(s)
-}
-
-// verifyBillingHeaderUnique checks that the body contains exactly ONE
-// billing header marker. Multiple markers could cause first-match regex
-// to sign the wrong token (e.g. an LTM entry documenting the header format).
-//
-// Both signAnthropicMessagesBody and any future resignBody use first-match
-// .ReplaceAll and trust that the single match is the real header (always
-// system[0], nothing precedes it). That trust is only safe when the marker
-// is unique.
-//
-// This is report-only: signing proceeds unchanged, but we log a warning
-// as an early warning signal. In practice this should never fire.
-func verifyBillingHeaderUnique(body []byte, caller string) {
-	count := strings.Count(string(body), billingMarker)
-	if count <= 1 {
-		return // Unique or absent - invariant holds
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"caller":      caller,
-		"markerCount": count,
-		"bodyLength":  len(body),
-	}).Warn("CCH: billing-header first-block invariant violated - " +
-		"first-match may sign wrong token and bust prompt cache")
-}
-
-func signAnthropicMessagesBody(body []byte) []byte {
-	verifyBillingHeaderUnique(body, "signAnthropicMessagesBody")
-	billingHeader := gjson.GetBytes(body, "system.0.text").String()
-	if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") {
-		return body
-	}
-	if !claudeBillingHeaderPattern.MatchString(billingHeader) {
-		return body
-	}
-	headerRange := claudeBillingHeaderPattern.FindStringIndex(billingHeader)
-	if headerRange == nil {
-		return body
-	}
-
-	unsignedBillingHeader := billingHeader
-	unsignedHeaderPrefix := unsignedBillingHeader[:headerRange[1]]
-	unsignedHeaderSuffix := unsignedBillingHeader[headerRange[1]:]
-	if claudeBillingHeaderCCHPattern.MatchString(unsignedHeaderPrefix) {
-		unsignedHeaderPrefix = claudeBillingHeaderCCHPattern.ReplaceAllString(unsignedHeaderPrefix, "cch=00000;")
-	} else {
-		unsignedHeaderPrefix += " cch=00000;"
-	}
-	unsignedBillingHeader = unsignedHeaderPrefix + unsignedHeaderSuffix
-	unsignedBody, err := sjson.SetBytes(body, "system.0.text", unsignedBillingHeader)
+func finalizeAnthropicMessagesBodyCCH(body []byte, fallbackBilling string) ([]byte, error) {
+	bodyWithPlaceholder, err := ensureClaudeBillingHeaderCCHPlaceholder(body, fallbackBilling)
 	if err != nil {
-		return body
+		return nil, err
 	}
-
-	// Extract version to determine preimage behavior
-	version := extractVersionFromBillingHeader(billingHeader)
-	cch := computeClaudeCCHWithVersion(unsignedBody, version)
-	signedBillingHeader := claudeBillingHeaderCCHPattern.ReplaceAllString(unsignedHeaderPrefix, "cch="+cch+";") + unsignedHeaderSuffix
-	signedBody, err := sjson.SetBytes(unsignedBody, "system.0.text", signedBillingHeader)
-	if err != nil {
-		return unsignedBody
-	}
-	return signedBody
+	return signAnthropicMessagesBody(bodyWithPlaceholder)
 }
 
-func computeClaudeCCHWithVersion(body []byte, version string) string {
-	// Apply preimage transformation conditionally based on version
-	var hashInput []byte
-	if shouldApplyPreimage(version) {
-		hashInput = cchPreimage(body)
-	} else {
-		hashInput = body
-	}
-
-	h := claudeCCHKeyedXXHash64Seed(hashInput, cchSeedForVersion(version))
-	return fmt.Sprintf("%05x", h&0xFFFFF)
+// claudeBodyNeedsBillingFallback reports whether a confirmed native helper request
+// still needs CPA's billing-header fallback.
+//
+// The measured minimal helper carries no system field at all, which is exactly the
+// native wire shape, so injecting a billing header there would be the deviation.
+// Keying on "system is absent" rather than "no billing header present" means that
+// if anything later in the pipeline (a payload rule, for instance) does attach a
+// system prompt, the fallback comes back and the request cannot go upstream with a
+// system block that native would never send unsigned.
+func claudeBodyNeedsBillingFallback(body []byte) bool {
+	return gjson.GetBytes(body, "system").Exists()
 }
 
-// computeClaudeCCH computes CCH hash assuming latest version behavior (with preimage).
-// Deprecated: Use computeClaudeCCHWithVersion for version-aware hashing.
-func computeClaudeCCH(body []byte) string {
-	// Apply preimage transformation (Claude Code >= 2.1.172)
-	// This clears the model value and removes max_tokens field before hashing.
-	// Safe to apply unconditionally: no-op when fields are absent.
-	preimage := cchPreimage(body)
-	h := claudeCCHKeyedXXHash64Seed(preimage, claudeSeed_2_1_138)
-	return fmt.Sprintf("%05x", h&0xFFFFF)
-}
-
-func claudeCCHXXHRound(state, lane uint64) uint64 {
-	state += lane * claudeCCHPrime64_2
-	state = bits.RotateLeft64(state, 31)
-	state *= claudeCCHPrime64_1
-	return state
-}
-
-func claudeCCHXXHMergeRound(acc, val uint64) uint64 {
-	val = claudeCCHXXHRound(0, val)
-	acc ^= val
-	return acc*claudeCCHPrime64_1 + claudeCCHPrime64_4
-}
-
-func claudeCCHKeyedXXHash64(body []byte, v1, v2, v3, v4 uint64) uint64 {
-	n := len(body)
-	i := 0
-	var h uint64
-
-	if n >= 32 {
-		for i+32 <= n {
-			v1 = claudeCCHXXHRound(v1, binary.LittleEndian.Uint64(body[i:]))
-			v2 = claudeCCHXXHRound(v2, binary.LittleEndian.Uint64(body[i+8:]))
-			v3 = claudeCCHXXHRound(v3, binary.LittleEndian.Uint64(body[i+16:]))
-			v4 = claudeCCHXXHRound(v4, binary.LittleEndian.Uint64(body[i+24:]))
-			i += 32
+func ensureClaudeBillingHeaderCCHPlaceholder(body []byte, fallbackBilling string) ([]byte, error) {
+	billing := gjson.GetBytes(body, "system.0.text")
+	if billing.Type != gjson.String || !strings.HasPrefix(billing.String(), "x-anthropic-billing-header:") {
+		if fallbackBilling == "" {
+			return body, nil
 		}
-		h = bits.RotateLeft64(v1, 1) +
-			bits.RotateLeft64(v2, 7) +
-			bits.RotateLeft64(v3, 12) +
-			bits.RotateLeft64(v4, 18)
-		h = claudeCCHXXHMergeRound(h, v1)
-		h = claudeCCHXXHMergeRound(h, v2)
-		h = claudeCCHXXHMergeRound(h, v3)
-		h = claudeCCHXXHMergeRound(h, v4)
-	} else {
-		h = v3 + claudeCCHPrime64_5
+		var errPrepend error
+		body, errPrepend = prependClaudeBillingSystemBlock(body, fallbackBilling)
+		if errPrepend != nil {
+			return nil, errPrepend
+		}
+		billing = gjson.GetBytes(body, "system.0.text")
 	}
-	h += uint64(n)
-
-	for i+8 <= n {
-		k := binary.LittleEndian.Uint64(body[i:])
-		k = claudeCCHXXHRound(0, k)
-		h ^= k
-		h = bits.RotateLeft64(h, 27)*claudeCCHPrime64_1 + claudeCCHPrime64_4
-		i += 8
-	}
-	for i+4 <= n {
-		k := uint64(binary.LittleEndian.Uint32(body[i:]))
-		h ^= k * claudeCCHPrime64_1
-		h = bits.RotateLeft64(h, 23)*claudeCCHPrime64_2 + claudeCCHPrime64_3
-		i += 4
-	}
-	for i < n {
-		h ^= uint64(body[i]) * claudeCCHPrime64_5
-		h = bits.RotateLeft64(h, 11) * claudeCCHPrime64_1
-		i++
+	if _, ok := claudeBillingCCHDigitsOffset(body); ok {
+		return body, nil
 	}
 
-	h ^= h >> 33
-	h *= claudeCCHPrime64_2
-	h ^= h >> 29
-	h *= claudeCCHPrime64_3
-	h ^= h >> 32
-	return h
+	billingText := billing.String()
+	entrypoint := strings.Index(billingText, "cc_entrypoint=")
+	if entrypoint < 0 {
+		return body, nil
+	}
+	entrypointEnd := strings.IndexByte(billingText[entrypoint:], ';')
+	if entrypointEnd < 0 {
+		return body, nil
+	}
+	insertAt := entrypoint + entrypointEnd + 1
+	billingText = billingText[:insertAt] + " cch=00000;" + billingText[insertAt:]
+	updated, err := sjson.SetBytes(body, "system.0.text", billingText)
+	if err != nil {
+		return nil, fmt.Errorf("insert Claude CCH placeholder: %w", err)
+	}
+	return updated, nil
+}
+
+func prependClaudeBillingSystemBlock(body []byte, billingText string) ([]byte, error) {
+	billingBlock := []byte(buildTextBlock(billingText, nil))
+	system := gjson.GetBytes(body, "system")
+	var systemArray []byte
+	switch {
+	case system.Type == gjson.String:
+		originalBlock := []byte(buildTextBlock(system.String(), nil))
+		systemArray = make([]byte, 0, len(billingBlock)+len(originalBlock)+3)
+		systemArray = append(systemArray, '[')
+		systemArray = append(systemArray, billingBlock...)
+		systemArray = append(systemArray, ',')
+		systemArray = append(systemArray, originalBlock...)
+		systemArray = append(systemArray, ']')
+	case system.IsArray():
+		rawSystem := bytes.TrimSpace([]byte(system.Raw))
+		if bytes.Equal(rawSystem, []byte("[]")) {
+			systemArray = make([]byte, 0, len(billingBlock)+2)
+			systemArray = append(systemArray, '[')
+			systemArray = append(systemArray, billingBlock...)
+			systemArray = append(systemArray, ']')
+		} else {
+			systemArray = make([]byte, 0, len(billingBlock)+len(rawSystem)+1)
+			systemArray = append(systemArray, '[')
+			systemArray = append(systemArray, billingBlock...)
+			systemArray = append(systemArray, ',')
+			systemArray = append(systemArray, rawSystem[1:]...)
+		}
+	default:
+		systemArray = make([]byte, 0, len(billingBlock)+2)
+		systemArray = append(systemArray, '[')
+		systemArray = append(systemArray, billingBlock...)
+		systemArray = append(systemArray, ']')
+	}
+
+	updated, err := sjson.SetRawBytes(body, "system", systemArray)
+	if err != nil {
+		return nil, fmt.Errorf("prepend Claude CCH billing block: %w", err)
+	}
+	return updated, nil
+}
+
+func isKimiAPIEndpoint(endpoint string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Hostname(), "api.kimi.com")
+}
+
+func isKimiMessagesUpstream(auth *cliproxyauth.Auth, endpoint string) bool {
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "kimi") {
+		return true
+	}
+	return isKimiAPIEndpoint(endpoint)
+}
+
+// stripDefaultKimiClaudeCodeAttribution removes the Claude Code billing/CCH
+// attribution block from a Kimi Messages body when the caller did not opt into
+// the full CLI profile. Kimi treats the block as prompt text, so forwarding it
+// unchanged would leak CPA's attribution into the model's context. Other system
+// content is preserved.
+func stripDefaultKimiClaudeCodeAttribution(auth *cliproxyauth.Auth, endpoint string, cliFingerprint bool, body []byte) []byte {
+	if cliFingerprint || !isKimiMessagesUpstream(auth, endpoint) {
+		return body
+	}
+	return util.StripClaudeCodeAttributionSystem(body)
+}
+
+// claudeCCHSigningEnabled applies CPA's CCH policy.
+//
+// Native gate, identical in Claude Code 2.1.220 through 2.1.234:
+//
+//	s = (provider === "firstParty" && isFirstPartyBaseURL()) || provider === "vertex"
+//	      ? " cch=00000;" : ""
+//
+// where isFirstPartyBaseURL() is true when ANTHROPIC_BASE_URL is unset or its
+// host is api.anthropic.com. Every other backend (bedrock, foundry, mantle,
+// anthropicAws, anthropicGoogleCloud, gateway, any custom base URL) sends the
+// billing header without cch.
+//
+// CPA maps that onto two authorities:
+//
+//   - A real Claude OAuth credential always signs, on every upstream. CPA is the
+//     hop that restores the first-party shape: a downstream Claude Code pointed at
+//     CPA sees a non-first-party base URL and therefore omits cch itself, so the
+//     value has to be regenerated here rather than inherited.
+//   - An API key or delegated provider signs only when it explicitly opted into
+//     the claude-code-cli profile AND the upstream is one the native gate accepts.
+//     On any other gateway the billing header still goes out, but without cch, so
+//     a per-request hash cannot bust that gateway's prompt cache.
+//
+// origin is the concrete upstream URL of the request being built. CPA additionally
+// requires https and the default port, which native does not check.
+func claudeCCHSigningEnabled(apiKey string, kind claudeCCHUpstreamKind, cliFingerprint bool, origin string) bool {
+	if isClaudeOAuthToken(apiKey) {
+		return true
+	}
+	if kind == claudeCCHUpstreamVertex {
+		return true
+	}
+	if !cliFingerprint {
+		return false
+	}
+	return kind == claudeCCHUpstreamAnthropic && isAnthropicUpstreamBase(origin)
+}
+
+// signAnthropicMessagesBody reproduces Claude Code 2.1.220's final-body CCH.
+// It changes only the five CCH digits in the outgoing body.
+func signAnthropicMessagesBody(body []byte) ([]byte, error) {
+	cchOffset, ok := claudeBillingCCHDigitsOffset(body)
+	if !ok {
+		return body, nil
+	}
+
+	unsignedBody := bytes.Clone(body)
+	copy(unsignedBody[cchOffset:cchOffset+claudeCCHLength], claudeCCHZero)
+	normalizedBody, err := normalizeClaudeCCHInput(unsignedBody)
+	if err != nil {
+		return nil, fmt.Errorf("normalize Claude CCH input: %w", err)
+	}
+
+	hasher := xxHash64.New(claudeCCHSeed)
+	if _, err = hasher.Write(normalizedBody); err != nil {
+		return nil, fmt.Errorf("hash Claude CCH input: %w", err)
+	}
+	cch := fmt.Sprintf("%05x", hasher.Sum64()&0xFFFFF)
+	copy(unsignedBody[cchOffset:cchOffset+claudeCCHLength], cch)
+	return unsignedBody, nil
+}
+
+func claudeBillingCCHDigitsOffset(body []byte) (int, bool) {
+	billing := gjson.GetBytes(body, "system.0.text")
+	if billing.Type != gjson.String || !strings.HasPrefix(billing.String(), "x-anthropic-billing-header:") {
+		return 0, false
+	}
+
+	raw := []byte(billing.Raw)
+	for searchFrom := 0; searchFrom < len(raw); {
+		relative := bytes.Index(raw[searchFrom:], []byte("cch="))
+		if relative < 0 {
+			return 0, false
+		}
+		prefix := searchFrom + relative
+		digits := prefix + len("cch=")
+		end := digits + claudeCCHLength
+		if end < len(raw) && raw[end] == ';' && isLowerHex(raw[digits:end]) {
+			return billing.Index + digits, true
+		}
+		searchFrom = prefix + len("cch=")
+	}
+	return 0, false
+}
+
+func isLowerHex(value []byte) bool {
+	if len(value) != claudeCCHLength {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeClaudeCCHInput builds the hash view without reserializing JSON.
+// Model string values are emptied, while dispatch-only members are omitted.
+func normalizeClaudeCCHInput(body []byte) ([]byte, error) {
+	if !json.Valid(body) {
+		return nil, fmt.Errorf("invalid JSON body")
+	}
+
+	scanner := claudeCCHJSONScanner{
+		body:  body,
+		edits: make([]claudeCCHNormalizationEdit, 0),
+	}
+	if err := scanner.parseValue(true); err != nil {
+		return nil, err
+	}
+	scanner.skipWhitespace()
+	if scanner.pos != len(body) {
+		return nil, fmt.Errorf("unexpected JSON data at byte %d", scanner.pos)
+	}
+
+	sort.Slice(scanner.edits, func(i, j int) bool {
+		return scanner.edits[i].start < scanner.edits[j].start
+	})
+	normalized := make([]byte, 0, len(body))
+	last := 0
+	for _, edit := range scanner.edits {
+		if edit.start < last || edit.end > len(body) {
+			return nil, fmt.Errorf("overlapping CCH normalization edit at byte %d", edit.start)
+		}
+		normalized = append(normalized, body[last:edit.start]...)
+		last = edit.end
+	}
+	normalized = append(normalized, body[last:]...)
+	return normalized, nil
+}
+
+func (scanner *claudeCCHJSONScanner) parseValue(collect bool) error {
+	scanner.skipWhitespace()
+	if scanner.pos >= len(scanner.body) {
+		return fmt.Errorf("missing JSON value at byte %d", scanner.pos)
+	}
+
+	switch scanner.body[scanner.pos] {
+	case '{':
+		return scanner.parseObject(collect)
+	case '[':
+		return scanner.parseArray(collect)
+	case '"':
+		_, _, err := scanner.parseString()
+		return err
+	default:
+		start := scanner.pos
+		for scanner.pos < len(scanner.body) {
+			switch scanner.body[scanner.pos] {
+			case ',', '}', ']', ' ', '\t', '\r', '\n':
+				if scanner.pos == start {
+					return fmt.Errorf("missing JSON value at byte %d", start)
+				}
+				return nil
+			default:
+				scanner.pos++
+			}
+		}
+		if scanner.pos == start {
+			return fmt.Errorf("missing JSON value at byte %d", start)
+		}
+		return nil
+	}
+}
+
+func (scanner *claudeCCHJSONScanner) parseObject(collect bool) error {
+	scanner.pos++
+	scanner.skipWhitespace()
+	if scanner.consume('}') {
+		return nil
+	}
+
+	members := make([]claudeCCHJSONMember, 0)
+	commaBefore := -1
+	for {
+		scanner.skipWhitespace()
+		memberStart := scanner.pos
+		keyStart, keyEnd, err := scanner.parseString()
+		if err != nil {
+			return err
+		}
+		scanner.skipWhitespace()
+		if !scanner.consume(':') {
+			return fmt.Errorf("missing object colon at byte %d", scanner.pos)
+		}
+		scanner.skipWhitespace()
+
+		key := scanner.body[keyStart:keyEnd]
+		excluded := collect && isClaudeCCHExcludedKey(key)
+		if collect && bytes.Equal(key, []byte(`"model"`)) && scanner.pos < len(scanner.body) && scanner.body[scanner.pos] == '"' {
+			valueStart, valueEnd, errString := scanner.parseString()
+			if errString != nil {
+				return errString
+			}
+			scanner.addEdit(valueStart+1, valueEnd-1)
+		} else if err = scanner.parseValue(collect && !excluded); err != nil {
+			return err
+		}
+		memberEnd := scanner.pos
+		scanner.skipWhitespace()
+
+		commaAfter := -1
+		if scanner.consume(',') {
+			commaAfter = scanner.pos - 1
+		}
+		members = append(members, claudeCCHJSONMember{
+			start:       memberStart,
+			end:         memberEnd,
+			commaBefore: commaBefore,
+			commaAfter:  commaAfter,
+			excluded:    excluded,
+		})
+		if commaAfter >= 0 {
+			commaBefore = commaAfter
+			continue
+		}
+		if !scanner.consume('}') {
+			return fmt.Errorf("missing object end at byte %d", scanner.pos)
+		}
+		break
+	}
+
+	if collect {
+		scanner.addExcludedMemberEdits(members)
+	}
+	return nil
+}
+
+func (scanner *claudeCCHJSONScanner) parseArray(collect bool) error {
+	scanner.pos++
+	scanner.skipWhitespace()
+	if scanner.consume(']') {
+		return nil
+	}
+
+	for {
+		if err := scanner.parseValue(collect); err != nil {
+			return err
+		}
+		scanner.skipWhitespace()
+		if scanner.consume(',') {
+			continue
+		}
+		if !scanner.consume(']') {
+			return fmt.Errorf("missing array end at byte %d", scanner.pos)
+		}
+		return nil
+	}
+}
+
+func (scanner *claudeCCHJSONScanner) parseString() (start, end int, err error) {
+	if scanner.pos >= len(scanner.body) || scanner.body[scanner.pos] != '"' {
+		return 0, 0, fmt.Errorf("missing JSON string at byte %d", scanner.pos)
+	}
+
+	start = scanner.pos
+	scanner.pos++
+	for scanner.pos < len(scanner.body) {
+		switch scanner.body[scanner.pos] {
+		case '\\':
+			scanner.pos += 2
+		case '"':
+			scanner.pos++
+			return start, scanner.pos, nil
+		default:
+			scanner.pos++
+		}
+	}
+	return 0, 0, fmt.Errorf("unterminated JSON string at byte %d", start)
+}
+
+func (scanner *claudeCCHJSONScanner) addExcludedMemberEdits(members []claudeCCHJSONMember) {
+	for start := 0; start < len(members); {
+		if !members[start].excluded {
+			start++
+			continue
+		}
+
+		end := start
+		for end+1 < len(members) && members[end+1].excluded {
+			end++
+		}
+		switch {
+		case end+1 < len(members):
+			scanner.addEdit(members[start].start, members[end].commaAfter+1)
+		case start > 0 && end > start:
+			// Claude Code 2.1.220 leaves the preceding comma in its hash view
+			// when an object ends with multiple consecutive dispatch members.
+			scanner.addEdit(members[start].start, members[end].end)
+		case start > 0:
+			scanner.addEdit(members[start].commaBefore, members[end].end)
+		default:
+			scanner.addEdit(members[start].start, members[end].end)
+		}
+		start = end + 1
+	}
+}
+
+func (scanner *claudeCCHJSONScanner) addEdit(start, end int) {
+	if start >= end {
+		return
+	}
+	scanner.edits = append(scanner.edits, claudeCCHNormalizationEdit{start: start, end: end})
+}
+
+func (scanner *claudeCCHJSONScanner) skipWhitespace() {
+	for scanner.pos < len(scanner.body) {
+		switch scanner.body[scanner.pos] {
+		case ' ', '\t', '\r', '\n':
+			scanner.pos++
+		default:
+			return
+		}
+	}
+}
+
+func (scanner *claudeCCHJSONScanner) consume(character byte) bool {
+	if scanner.pos >= len(scanner.body) || scanner.body[scanner.pos] != character {
+		return false
+	}
+	scanner.pos++
+	return true
+}
+
+func isClaudeCCHExcludedKey(key []byte) bool {
+	switch string(key) {
+	case `"max_tokens"`, `"fallbacks"`, `"fallback_credit_token"`:
+		return true
+	default:
+		return false
+	}
 }
 
 func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.ClaudeKey {
@@ -391,7 +542,10 @@ func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *c
 	return entry.Cloak
 }
 
-func experimentalCCHSigningEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+func rebuildMidSystemMessageEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["rebuild_mid_system_message"]), "true") {
+		return true
+	}
 	entry := resolveClaudeKeyConfig(cfg, auth)
-	return entry != nil && entry.ExperimentalCCHSigning
+	return entry != nil && entry.RebuildMidSystemMessage
 }

@@ -334,8 +334,6 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "pprof.addr":
 			return node.Value == DefaultPprofAddr
-		case "remote-management.panel-github-repository":
-			return node.Value == DefaultPanelGitHubRepository
 		case "plugins.dir":
 			return node.Value == "plugins"
 		case "routing.strategy":

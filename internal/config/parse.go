@@ -35,7 +35,6 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.WebsocketAuth = true
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
-	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
 
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
@@ -57,11 +56,6 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 			return nil, fmt.Errorf("hash remote management key: %w", errHash)
 		}
 		cfg.RemoteManagement.SecretKey = string(hashed)
-	}
-
-	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
-	if cfg.RemoteManagement.PanelGitHubRepository == "" {
-		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	}
 
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)

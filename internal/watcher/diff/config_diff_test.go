@@ -16,11 +16,9 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 			{APIKey: "old", BaseURL: "http://old", ExcludedModels: []string{"old-model"}},
 		},
 		RemoteManagement: config.RemoteManagement{
-			AllowRemote:            false,
-			SecretKey:              "old",
-			DisableControlPanel:    false,
-			DisableAutoUpdatePanel: false,
-			PanelGitHubRepository:  "repo-old",
+			AllowRemote:         false,
+			SecretKey:           "old",
+			DisableControlPanel: false,
 		},
 		OAuthExcludedModels: map[string][]string{
 			"providerA": {"m1"},
@@ -44,11 +42,9 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 			{APIKey: "old", BaseURL: "http://old", ExcludedModels: []string{"old-model", "extra"}},
 		},
 		RemoteManagement: config.RemoteManagement{
-			AllowRemote:            true,
-			SecretKey:              "new",
-			DisableControlPanel:    true,
-			DisableAutoUpdatePanel: true,
-			PanelGitHubRepository:  "repo-new",
+			AllowRemote:         true,
+			SecretKey:           "new",
+			DisableControlPanel: true,
 		},
 		OAuthExcludedModels: map[string][]string{
 			"providerA": {"m1", "m2"},
@@ -77,7 +73,6 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 	expectContains(t, details, "auth-dir: /tmp/auth-old -> /tmp/auth-new")
 	expectContains(t, details, "gemini[0].excluded-models: updated (1 -> 2 entries)")
 	expectContains(t, details, "remote-management.allow-remote: false -> true")
-	expectContains(t, details, "remote-management.disable-auto-update-panel: false -> true")
 	expectContains(t, details, "remote-management.secret-key: updated")
 	expectContains(t, details, "codex.disable-codex-cloaking: false -> true")
 	expectContains(t, details, "oauth-excluded-models[providera]: updated (1 -> 2 entries)")
@@ -301,18 +296,12 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 func TestBuildConfigChangeDetails_RedactsEndpointURLs(t *testing.T) {
 	oldCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{{BaseURL: "https://old-user:old-pass@old.example/v1?token=old-token"}},
-		RemoteManagement: config.RemoteManagement{
-			PanelGitHubRepository: "https://old-user:old-pass@old-panel.example/private?token=old-token",
-		},
 		OpenAICompatibility: []config.OpenAICompatibility{{
 			BaseURL: "https://old-user:old-pass@old-compat.example/v1?token=old-token",
 		}},
 	}
 	newCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{{BaseURL: "https://new-user:new-pass@new.example/v1?token=new-token"}},
-		RemoteManagement: config.RemoteManagement{
-			PanelGitHubRepository: "https://new-user:new-pass@new-panel.example/private?token=new-token",
-		},
 		OpenAICompatibility: []config.OpenAICompatibility{{
 			BaseURL: "https://new-user:new-pass@new-compat.example/v1?token=new-token",
 		}},
@@ -320,7 +309,6 @@ func TestBuildConfigChangeDetails_RedactsEndpointURLs(t *testing.T) {
 
 	details := BuildConfigChangeDetails(oldCfg, newCfg)
 	expectContains(t, details, "gemini[0].base-url: https://old.example -> https://new.example")
-	expectContains(t, details, "remote-management.panel-github-repository: https://old-panel.example -> https://new-panel.example")
 	joined := strings.Join(details, "\n")
 	for _, sensitive := range []string{"old-user", "new-user", "old-pass", "new-pass", "old-token", "new-token", "/private", "/v1"} {
 		if strings.Contains(joined, sensitive) {
@@ -347,7 +335,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		Antigravity:                   config.AntigravityConfig{SensitiveWords: []string{"old-word"}},
 		ClaudeKey:                     []config.ClaudeKey{{APIKey: "c1"}},
 		CodexKey:                      []config.CodexKey{{APIKey: "x1"}},
-		RemoteManagement:              config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
+		RemoteManagement:              config.RemoteManagement{DisableControlPanel: false, SecretKey: "keep"},
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 false,
 			ProxyURL:                   "http://old-proxy",
@@ -381,10 +369,8 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			{APIKey: "x2"},
 		},
 		RemoteManagement: config.RemoteManagement{
-			DisableControlPanel:    true,
-			DisableAutoUpdatePanel: true,
-			PanelGitHubRepository:  "new/repo",
-			SecretKey:              "",
+			DisableControlPanel: true,
+			SecretKey:           "",
 		},
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 true,
@@ -425,8 +411,6 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "claude-api-key count: 1 -> 2")
 	expectContains(t, details, "codex-api-key count: 1 -> 2")
 	expectContains(t, details, "remote-management.disable-control-panel: false -> true")
-	expectContains(t, details, "remote-management.disable-auto-update-panel: false -> true")
-	expectContains(t, details, "remote-management.panel-github-repository: old -> new")
 	expectContains(t, details, "remote-management.secret-key: deleted")
 }
 
@@ -458,11 +442,9 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			{APIKey: "v-old", BaseURL: "http://v-old", ProxyURL: "http://vp-old", Headers: map[string]string{"H": "1"}, Models: []config.VertexCompatModel{{Name: "m1"}}},
 		},
 		RemoteManagement: config.RemoteManagement{
-			AllowRemote:            false,
-			DisableControlPanel:    false,
-			DisableAutoUpdatePanel: false,
-			PanelGitHubRepository:  "old/repo",
-			SecretKey:              "old",
+			AllowRemote:         false,
+			DisableControlPanel: false,
+			SecretKey:           "old",
 		},
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: false,
@@ -507,11 +489,9 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			{APIKey: "v-new", BaseURL: "http://v-new", ProxyURL: "http://vp-new", Headers: map[string]string{"H": "2"}, Models: []config.VertexCompatModel{{Name: "m1"}, {Name: "m2"}}},
 		},
 		RemoteManagement: config.RemoteManagement{
-			AllowRemote:            true,
-			DisableControlPanel:    true,
-			DisableAutoUpdatePanel: true,
-			PanelGitHubRepository:  "new/repo",
-			SecretKey:              "",
+			AllowRemote:         true,
+			DisableControlPanel: true,
+			SecretKey:           "",
 		},
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:             true,
@@ -579,8 +559,6 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "oauth-excluded-models[p2]: added (1 entries)")
 	expectContains(t, changes, "remote-management.allow-remote: false -> true")
 	expectContains(t, changes, "remote-management.disable-control-panel: false -> true")
-	expectContains(t, changes, "remote-management.disable-auto-update-panel: false -> true")
-	expectContains(t, changes, "remote-management.panel-github-repository: old -> new")
 	expectContains(t, changes, "remote-management.secret-key: deleted")
 	expectContains(t, changes, "openai-compatibility:")
 }

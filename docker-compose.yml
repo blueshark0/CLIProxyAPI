@@ -1,26 +1,21 @@
 services:
-  cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
+  mpapi:
+    image: ${CLI_PROXY_IMAGE:-marcosman/mpapi:latest}
     pull_policy: always
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        VERSION: ${VERSION:-dev}
-        COMMIT: ${COMMIT:-none}
-        BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: cli-proxy-api
+    container_name: mpapi
     # env_file:
     #   - .env
     environment:
       DEPLOY: ${DEPLOY:-}
+    # 8085 Gemini OAuth 回调
+    # 1455 Codex (OpenAI) OAuth 回调
+    # 54545 Claude (Anthropic) OAuth 回调
+    # 51121 Antigravity OAuth 回调
     ports:
       - "9950:9950"
-      - "8085:8085"
-      - "1455:1455"
-      - "54545:54545"
-      - "51121:51121"
-      - "11451:11451"
+    #  - "1455:1455"
+    #  - "54545:54545"
+    #  - "51121:51121"
     volumes:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api

@@ -3,7 +3,7 @@
 host: ""
 
 # Server port
-port: 8317
+port: 9950
 
 # Restrict service access to these HTTP Host domains. Ports, letter case, and a trailing dot are ignored.
 # Leave empty to allow any domain or IP address.
